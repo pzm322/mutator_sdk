@@ -30,7 +30,7 @@ namespace pzm {
     std::deque< ws_packet_t > received_packets = { };
     std::shared_ptr< ws_client_t::Connection > g_connection = { };
 
-    ws_client_t g_client( "fatal.shop:443/ws/", false );
+    ws_client_t g_client( "pzm322.com:443/ws/mutator/", false );
 
     enum class callback_t {
         CALLBACK_EXPORT_INIT = 0,
