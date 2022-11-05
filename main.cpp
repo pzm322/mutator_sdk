@@ -1,7 +1,27 @@
 #include "mutator/inst.hpp"
 
+void on_mmap_end( void* this_ptr ) {
+    printf( "PE mapped!\n" );
+}
+
 void on_export_init( void* this_ptr ) {
-    printf( "initing export!\n" );
+    auto details = reinterpret_cast< pzm::export_callback_t* >( this_ptr );
+
+    // since mapper can't know what's the actual size of exported var you need to set it yourself
+    // to determine which export you're dealing with, access the "name" field in details ptr
+    // in this sample we consider that all of our exports are 16 bytes length
+    // note: default size is always 4
+    details->set_size( 16 );
+
+    // predefine all exports starting with the "offset_" prefix
+    if ( details->name.substr( 0, 7 ) == "offset_" ) {
+        uint32_t offset_value = 0x12345;
+        details->data = &offset_value;
+
+        // data field should contain a pointer to the actual data
+    }
+
+    printf( "[init] export - %s\n", details->name.c_str( ) );
 }
 
 int main( ) {
@@ -12,8 +32,8 @@ int main( ) {
         return 1;
     }
 
-    pzm::username = "username"; // your username from website
-    pzm::password = "password"; // your password from website
+    pzm::username = "memes"; // your username from website
+    pzm::password = "123"; // your password from website
 
     if ( !pzm::auth( ) ) {
         printf( "failed to auth, check your credentials and subscription\n" );
@@ -43,6 +63,35 @@ int main( ) {
     }
 
     printf( "mutator has been successfully initialized!\n" );
+
+    // mapper data is a json object that contains all necessary information your binary requires
+    // there's a size field which is responsible for allocation size and imports that are being used
+    auto mapper_data = pzm::instance->get_mapper_data( );
+    printf( "[+] mapper data - %s\n", mapper_data.dump( ).c_str( ) );
+
+    nlohmann::json client_info;
+    client_info[ "base" ] = 0x10000000; // base of allocated region
+
+    // these imports should be resolved on client
+    // after obtaining import addresses pass them to json object in sequence : module -> function -> address
+    for ( const auto& imported_module : mapper_data.at( "imports" ).get< nlohmann::json::object_t >( ) ) {
+        for ( const auto& function : imported_module.second.get< nlohmann::json::array_t >( ) )
+            client_info[ "imports" ][ imported_module.first ][ function.get< std::string >( ) ] = 0x77000000;
+    }
+
+    // for now binary is already mutated and ready to be mapped and launched
+    // create an std::vector< uint8_t > which will later contain entire PE binary
+    // pass client information and reference to binary storage as arguments in proceed function
+    std::vector< uint8_t > mapped_bin = { };
+    if ( !pzm::instance->proceed( client_info, mapped_bin ) ) {
+        printf( "failed to proceed binary mapping!\n" );
+    }
+
+    printf( "[+] launch details - %s\n", client_info.dump( ).c_str( ) );
+
+    std::ofstream test_binary( "test_file.bin", std::ios::binary );
+    test_binary.write( ( char* ) mapped_bin.data( ), ( long long ) mapped_bin.size( ) );
+    test_binary.close( );
 
     pzm::unload( );
     return 0;

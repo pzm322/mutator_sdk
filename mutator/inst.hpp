@@ -22,19 +22,20 @@ namespace pzm {
 
     std::string username;
     std::string password;
-
     std::string session_id;
 
-    std::thread g_client_thread;
+    nlohmann::json pending_request;
 
-    std::deque< ws_packet_t > received_packets = { };
+    std::thread g_client_thread;
     std::shared_ptr< ws_client_t::Connection > g_connection = { };
 
     ws_client_t g_client( "pzm322.com:443/ws/mutator/", false );
 
     enum class callback_t {
         CALLBACK_EXPORT_INIT = 0,
-        CALLBACK_EXPORT_MMAP
+        CALLBACK_EXPORT_MMAP,
+        CALLBACK_MMAP_START,
+        CALLBACK_MMAP_END,
     };
 
     enum class option_t {
@@ -47,6 +48,16 @@ namespace pzm {
         STATUS_MISSING_MAP,
         STATUS_MISSING_BIN,
         STATUS_INVALID_BIN
+    };
+
+    struct export_callback_t {
+        std::string name;
+        void* data = nullptr;
+        size_t field_size = 4;
+
+        void set_size( size_t size ) {
+            field_size = size;
+        }
     };
 
     class c_mutator {
@@ -95,7 +106,6 @@ namespace pzm {
                     return;
                 }
             }
-
             void add_callback( callback_t callback, const std::function< void ( void* ) >& handler ) {
                 m_callbacks.emplace( std::make_pair( callback, handler ) );
             }
@@ -124,19 +134,55 @@ namespace pzm {
                 init_request[ "pe" ] = pe_binary;
                 init_request[ "settings" ][ "shuffle" ] = m_options.shuffle;
 
+                for ( const auto& callback : m_callbacks )
+                    init_request[ "settings" ][ "callbacks" ].emplace_back( static_cast< int >( callback.first ) );
+
                 g_connection->send( init_request.dump( ) );
+
                 while ( request_status == -1 )
                     std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
 
                 return static_cast< status_t >( request_status );
             }
 
+            nlohmann::json get_mapper_data( ) {
+                nlohmann::json request;
+                request[ "session" ] = session_id;
+                request[ "type" ] = 2;
+
+                g_connection->send( request.dump( ) );
+                while ( pending_request.empty( ) )
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 50 ) );
+
+                auto mapper_data = pending_request;
+                pending_request.clear( );
+                return mapper_data;
+            }
+
+            bool proceed( nlohmann::json& mapper_data, std::vector< uint8_t >& binary ) {
+                nlohmann::json request;
+                request[ "session" ] = session_id;
+                request[ "type" ] = 3;
+                request[ "data" ] = mapper_data;
+
+                g_connection->send( request.dump( ) );
+                while ( pending_request.empty( ) )
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 50 ) );
+
+                mapper_data = pending_request.at( "data" ).get< nlohmann::json::object_t >( );
+                auto succeeded = pending_request.at( "succeeded" ).get< bool >( );
+                binary = pending_request.at( "pe_bin" ).get< std::vector< uint8_t > >( );
+
+                pending_request.clear( );
+                return succeeded;
+            }
+
+            std::unordered_map< callback_t, std::function< void ( void* ) > > m_callbacks = { };
+
         private:
 
             std::vector< uint8_t > pe_binary = { };
             std::string map_file;
-
-            std::unordered_map< callback_t, std::function< void ( void* ) > > m_callbacks = { };
 
             status_t last_status = status_t::STATUS_SUCCESS;
 
@@ -172,6 +218,65 @@ namespace pzm {
                     request_status = request.at( "status" ).get< int >( );
                     break;
                 }
+                case 3: {
+                    pending_request = request.at( "data" ).get< nlohmann::json::object_t >( );
+                    break;
+                }
+                case 4: {
+                    pending_request = request;
+                    break;
+                }
+                case 5: {
+                    auto callback_type = request.at( "callback" ).get< callback_t >( );
+                    if ( instance->m_callbacks.find( callback_type ) == instance->m_callbacks.end( ) )
+                        break;
+
+                    void* callback_data = nullptr;
+
+                    nlohmann::json response;
+                    response[ "session" ] = session_id;
+                    response[ "type" ] = 5;
+                    response[ "callback" ] = callback_type;
+
+                    switch ( callback_type ) {
+                        case callback_t::CALLBACK_EXPORT_MMAP:
+                        case callback_t::CALLBACK_EXPORT_INIT: {
+                            auto export_data = new export_callback_t( );
+                            export_data->name = request.at( "name" ).get<
+                                    std::string>( );
+                            export_data->data = malloc( 1000 );
+                            callback_data = reinterpret_cast< void * >( export_data );
+                            break;
+                        }
+                        case callback_t::CALLBACK_MMAP_START:
+                        case callback_t::CALLBACK_MMAP_END: {
+                            break;
+                        }
+                    }
+
+                    instance->m_callbacks.at( callback_type )( callback_data );
+
+                    switch ( callback_type ) {
+                        case callback_t::CALLBACK_EXPORT_MMAP:
+                        case callback_t::CALLBACK_EXPORT_INIT: {
+                            auto export_data = reinterpret_cast< export_callback_t* >( callback_data );
+                            response[ "size" ] = export_data->field_size;
+
+                            for ( size_t i = 0; i < export_data->field_size; i++ ) {
+                                response[ "bin" ].emplace_back(
+                                    reinterpret_cast< uint8_t * >( export_data->data )[ i ] );
+                            }
+
+                            connection->send( response.dump( ) );
+                            break;
+                        }
+                        case callback_t::CALLBACK_MMAP_START:
+                        case callback_t::CALLBACK_MMAP_END:
+                            break;
+                    }
+
+                    break;
+                }
             }
         }
 
@@ -182,6 +287,7 @@ namespace pzm {
 
         g_client.on_open = [ ] ( const std::shared_ptr< ws_client_t::Connection >& connection ) {
             g_connection = connection;
+            printf( "opened connection!\n" );
         };
 
         g_client.on_message = ws_callbacks::on_message;
