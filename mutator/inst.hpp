@@ -29,7 +29,7 @@ namespace pzm {
     std::thread g_client_thread;
     std::shared_ptr< ws_client_t::Connection > g_connection = { };
 
-    ws_client_t g_client( "pzm322.com:443/ws/mutator/", false );
+    ws_client_t g_client( "pzm322.com/ws/mutator", false );
 
     enum class callback_t {
         CALLBACK_EXPORT_INIT = 0,
@@ -40,6 +40,8 @@ namespace pzm {
 
     enum class option_t {
         OPTION_SHUFFLE = 0,
+        OPTION_PARTITION,
+        OPTION_PARTITION_VALIDATE
     };
 
     enum class status_t {
@@ -116,6 +118,12 @@ namespace pzm {
                     case option_t::OPTION_SHUFFLE:
                         m_options.shuffle = value;
                         break;
+                    case option_t::OPTION_PARTITION:
+                        m_options.partition = value;
+                        break;
+                    case option_t::OPTION_PARTITION_VALIDATE:
+                        m_options.verify_partition = value;
+                        break;
                 }
             }
 
@@ -133,6 +141,8 @@ namespace pzm {
                 init_request[ "map" ] = map_file;
                 init_request[ "pe" ] = pe_binary;
                 init_request[ "settings" ][ "shuffle" ] = m_options.shuffle;
+                init_request[ "settings" ][ "partition" ] = m_options.partition;
+                init_request[ "settings" ][ "verify_partition" ] = m_options.verify_partition;
 
                 for ( const auto& callback : m_callbacks )
                     init_request[ "settings" ][ "callbacks" ].emplace_back( static_cast< int >( callback.first ) );
@@ -159,7 +169,7 @@ namespace pzm {
                 return mapper_data;
             }
 
-            bool proceed( nlohmann::json& mapper_data, std::vector< uint8_t >& binary ) {
+            bool proceed( nlohmann::json& mapper_data, std::vector< std::vector< uint8_t > >& binaries ) {
                 nlohmann::json request;
                 request[ "session" ] = session_id;
                 request[ "type" ] = 3;
@@ -171,7 +181,7 @@ namespace pzm {
 
                 mapper_data = pending_request.at( "data" ).get< nlohmann::json::object_t >( );
                 auto succeeded = pending_request.at( "succeeded" ).get< bool >( );
-                binary = pending_request.at( "pe_bin" ).get< std::vector< uint8_t > >( );
+                binaries = pending_request.at( "pe_bin" ).get< std::vector< std::vector< uint8_t > > >( );
 
                 pending_request.clear( );
                 return succeeded;
@@ -188,6 +198,8 @@ namespace pzm {
 
             struct _options {
                 bool shuffle = false;
+                bool partition = false;
+                bool verify_partition = false;
             } m_options;
 
     };
@@ -262,10 +274,11 @@ namespace pzm {
                             auto export_data = reinterpret_cast< export_callback_t* >( callback_data );
                             response[ "size" ] = export_data->field_size;
 
-                            for ( size_t i = 0; i < export_data->field_size; i++ ) {
-                                response[ "bin" ].emplace_back(
-                                    reinterpret_cast< uint8_t * >( export_data->data )[ i ] );
-                            }
+                            std::vector< uint8_t > export_binary = { };
+                            export_binary.resize( export_data->field_size );
+                            memcpy( export_binary.data( ), export_data->data, export_data->field_size );
+
+                            response[ "bin" ] = export_binary;
 
                             connection->send( response.dump( ) );
                             break;
